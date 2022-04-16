@@ -1,0 +1,1262 @@
+---
+title: "Final Project"
+subtitle: "Data Mining - S21 A3"
+author: "Group N: Chris Weddle (cweddle),Ravi Patel(rjpatel), Sanjana Parmar (sparmar2)" 
+output: 
+  html_document:
+  toc: true
+toc_depth: 3
+theme: lumen
+highlight: pygments
+---
+  
+```{r}
+
+library(ggplot2)
+library(ggcorrplot)
+library(GGally)
+library(leaps)
+library(splines)
+library(plyr)
+library(gam)
+library(glmnet)
+library(caret)
+library(corrplot)
+library(rpart)
+library(randomForest)
+library(pROC)
+library(tidyverse)
+library(dplyr)
+library(knitr)
+library(gridExtra)
+library(class)
+#library(cutpointr)
+
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+options(scipen = 4)
+
+```
+Problem Definition and Scope:
+
+The network_traffic.csv file is a synopsis of logged network activity. It contains labeled examples of benign network sessions as well as examples of sessions involving intrusions. The bank observed while analyzing a year long record of logs, there were many instances of anomalous network activity that resulted in significant sums of money being siphoned from bank accounts. In this project we intend to analyze the data to address the following questions:
+
+1. Is it possible to differentiate between the labeled intrusions and benign sessions? 
+
+2. Develop and implement a systematic approach to detect instances of intrusions in log files.  Our system will be able to take a new network_traffic log file and determine the existence of known patterns of intrusions as well as anomalies which may be indicative of new and unknown intrusion patterns.
+
+3. Evaluate detection power of our system.
+
+```{r}
+#Import the daa
+traffic.full <- read.csv("network_traffic.csv")
+set.seed(101)
+summary(traffic.full)
+```
+
+
+Data Cleaning:
+
+We started the data cleaning with analysing the range of values in each variable, using the summary function. There were a number of variables that had very few non zero values and for that reason we decided to drop those columns.
+
+
+```{r}
+traffic <-subset(traffic.full, select = -c(land, wrong_fragment, urgent, num_failed_logins, num_outbound_cmds,is_host_login))
+#Look for na values
+sum(is.na(traffic))
+```
+
+We went on to check for NA values in the remaining variables so that it doesnt cause a problem during the analysis.
+
+we changed the character variables into factors to enable their usage in the following methods of analysis.
+```{r}
+discrete <- c("protocol_type", "service", "flag", "su_attempted", "root_shell", "is_guest_login", "is_intrusion", "logged_in")
+traffic[,discrete] <- lapply(traffic[,discrete], factor)
+summary(traffic)
+```
+
+To get an idea of the distribution of values in different variables we plot them and check for number of non zero values.
+
+```{r}
+qplot(duration, data = traffic)
+qplot(hot, data=traffic)
+qplot(num_compromised, data=traffic)
+qplot(num_shells, data=traffic)
+qplot(num_root, data=traffic)
+length(traffic$num_compromised[traffic$num_compromised > 0])
+length(traffic$num_root[traffic$num_root > 0])
+length(traffic$num_root[traffic$num_root > 1])
+length(traffic$num_file_creations[traffic$num_file_creations > 0])
+length(traffic$num_access_files[traffic$num_access_files > 0])
+length(traffic$num_access_files[traffic$num_access_files > 1])
+length(traffic$num_shells[traffic$num_shells > 0])
+length(traffic$hot[traffic$hot > 0])
+
+```
+
+We observed that,
+num_compromised: 4 points > 0
+num_root: 20 points > 0
+num_root: 9 points > 1
+num_file_creations: 3 points > 0
+num_access_files: 9 points > 0
+num_access_files: 2 points > 1
+hot: 55 points > 0
+
+Get rid of num_compromised and num_file_creations
+
+num_root has 20 points > 0, and 9 points > 1. It has one very high value, 975. Change this into a factor of Zero and Non-Zero. 
+
+
+num_access_files has 9 points > 0. This will be left as it is for now.
+
+num_shells only have 1 value > 0. Drop this column.
+
+
+Hot has enough points > 0 to be left as it is.
+
+
+
+su_attempted a single 2, and this is not valid. Drop the column.
+root_shell only has 3 points with 1. Drop the column.
+
+
+Dropping a few additonal columns
+```{r}
+traffic <- subset(traffic, select = -c(num_compromised, num_file_creations, su_attempted, root_shell, num_shells))
+fact.list <- c("num_root")
+traffic$num_root <- ifelse(traffic$num_root==0, "Zero", "Non-Zero")
+traffic$num_root <-factor(traffic$num_root)
+summary(traffic)
+
+```
+
+
+
+Recoding variable values:
+
+flag: combine into "normal" or "error"
+
+
+```{r}
+traffic <- mutate(traffic,
+                  is_intrusion = recode_factor(is_intrusion,
+                                               "0" = "0",
+                                               "0=" = "0",
+                                               "1" = "1"))
+traffic <- mutate(traffic,
+                  flag = recode_factor(flag,
+                                        "SF"= "SF",
+                                       .default = "Error"))
+
+
+summary(traffic)
+
+```
+
+```{r}
+levels(traffic$service)
+```
+Keep only "http", "smtp", "private", "domain_u", and "ftp_data" from "service". Make everything else "other".
+
+
+```{r}
+traffic <- mutate(traffic,
+                  service = recode_factor(service,
+                                        "http"= "http",
+                                        "smtp" = "smtp",
+                                        "private" = "private",
+                                        "domain_u" = "domain_u",
+                                        "ftp_data" = "ftp_data",
+                                       .default = "other"))
+summary(traffic)
+```
+
+
+
+
+```{r}
+colnames(traffic)
+```
+
+
+
+
+
+
+Data Analysis
+
+Let us start with analysing how some of the variables are distributed in the dataset by plotting histograms.
+
+Histogram for the variables duration, hot and dst_bytes:
+
+```{r}
+qplot(duration, data = traffic)
+qplot(hot, data=traffic)
+qplot(dst_bytes, data=traffic)
+```
+
+
+The duration of the connection is very skewed to the right, but these high values might be important.
+
+The number of hot connections is similarly skewed, as is dst_bytes.Most of this data is very close to 0.
+
+
+
+Next, lets plot a correlation matrix of the numerical variables in the dataset:
+
+```{r}
+cor.mat <- cor(traffic[sapply(traffic, is.numeric)])
+
+ggcorrplot(cor.mat)
+correlations <- c()
+for(i in 1:nrow(cor.mat)) {
+  correlations <- append(correlations, which((cor.mat[i,] != 1 & (cor.mat[i,] >= .8 | cor.mat[i,] <=-.8))))
+}
+
+for(i in 1:nrow(cor.mat)) {
+  for(j in 1:ceiling(ncol(cor.mat)/2)) {
+    if((cor.mat[i,j] >= .8 | cor.mat[i,j] <= -.8) & cor.mat[i,j] < 1) {
+      print(c(rownames(cor.mat)[i], colnames(cor.mat)[j], cor.mat[i,j]))
+    }
+  }
+}
+
+```
+
+None of our numerical data is very strongly correlated. We don't have to worry about correlations between these variables.
+
+
+
+Pairs plot for selected predictor variables, including some binary variables to check if there are any strong correlations among the predictor variables.
+
+
+```{r}
+#Function take from ?pairs library on R
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...) {
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+
+
+
+
+vars_2r <- c("duration", "src_bytes", "dst_bytes", "hot", "num_access_files", "protocol_type", 
+          "service", "num_root", "flag", "logged_in", "is_guest_login")
+pairs_traffic <- traffic[vars_2r]
+
+pairs(pairs_traffic, upper.panel = panel.cor)
+```
+
+
+Potential correlations:
+There may be important correlations between:
+protocol_type & logged_in
+service & logged_in 
+hot & is_guest_login
+
+
+However, none of these correlations is high enough to remove one of these columns from the data.
+
+
+Now checking for correlations with the response variable is_intrusion:
+
+```{r}
+vars.2 <- c("src_bytes", "service", "hot", "protocol_type", "flag", "logged_in", "is_guest_login", "is_intrusion")
+pairs_traffic <- traffic[vars.2]
+
+pairs(pairs_traffic, upper.panel = panel.cor)
+```
+
+
+Src_bytes has a correlation of 0.42 with is_intrusion. This may be an important variable to consider when detecting intrusions. 
+For further analysis of the association between these two variables, let us create side-by-side boxplots to explore the association between the two variables src_bytes and is_intrusion:
+
+```{r}
+ggplot(traffic, aes(x=is_intrusion, y= src_bytes))+
+  geom_boxplot()
+```
+This boxplot indicates that high numbers of src_bytes is a good indication of an intrusion.
+
+Split src_bytes into bins, see how the bytes are associated with is_intrusion.
+
+```{r}
+ggplot(traffic, aes(x = src_bytes, y = is_intrusion)) +
+  geom_point()
+
+```
+
+Very high number of intrusions are associated with the src_bytes value range from 50,000 to 80,000.
+
+
+Exploring association between dst_bytes and is_intrusion with side-by-side boxplot:
+
+```{r}
+
+ggplot(traffic, aes(x=is_intrusion, y= dst_bytes))+
+  geom_boxplot()
+```
+
+
+
+Exploring association with is_intrusion for low values of dst_bytes (<500):
+
+```{r}
+
+traffic_plot_r = traffic
+
+traffic_plot_r <- traffic_plot_r %>% filter(dst_bytes < 2000)
+
+ggplot(traffic_plot_r, aes(x=is_intrusion, y= dst_bytes))+
+  geom_boxplot()
+```
+
+Although the two boxplots overlap, the occurrence of intrusion is associated with relatively lower values of dst_bytes.
+
+
+Next, plotting a bar graph to explore association between the variables logged_in and is_intrusion.
+
+```{r}
+
+ggplot(data=traffic, aes(x=logged_in,fill=is_intrusion)) + 
+  geom_bar(position="dodge")
+
+```
+When a case is not logged in, the chances of it being an intrusion are much higher than if someone is logged in.
+
+
+Similarly, plotting a bar graph to explore association between the variables flag and is_intrusion.
+
+
+```{r}
+ggplot(data=traffic, aes(x=flag,fill=is_intrusion)) + 
+  geom_bar(position="dodge")
+
+```
+There were many types of flags in the data, but having any kind of flag associated with the connection makes the chances of the connection being an intrusion much higher.
+
+
+```{r}
+ggplot(data=traffic, aes(x=flag,fill=logged_in)) + 
+  geom_bar(position="dodge")
+
+```
+
+Although flag and logged_in do not have very high correlation value, proportion of instances with logged_in as 1 have high association with flag being marked as SF.
+
+
+Now, checking how different values of the categorical variable service are associated with is_intrusion.
+
+
+```{r}
+ggplot(data=traffic, aes(x=service,fill=is_intrusion)) + 
+  geom_bar(position="dodge")
+
+```
+
+From the above plot, we can observe that the values private and ftp_data of the variable service have high association with event of intrusion.
+
+
+Now, checking for the number of positive values for the variables num_access_files and hot.
+
+```{r}
+length(traffic$num_access_files[traffic$num_access_files > 0])
+length(traffic$hot[traffic$hot > 0])
+length(traffic$num_root[traffic$num_root == "Non-Zero"])
+
+# colnames(traffic)
+
+```
+
+num_access_files has 9 values greater than 0.
+num_root has 20 non-zero values.
+Consider removing num_access_files and num_root later for better model performance.
+
+The variable hot has 55 positive values which is not as low as num_access_files and num_root.
+
+
+Split the data into 20% testing and 80% training data
+
+```{r}
+test.indexes <- sample(1:nrow(traffic), round(0.2*nrow(traffic)))
+traffic.test <- traffic[test.indexes,]
+traffic.train <- traffic[-test.indexes,]
+```
+
+
+Do all of the model training on traffic.train
+
+
+
+
+Logistic regression, try different cutoffs 
+It is more important to correctly identify intrusions than correctly identify not-intrusions (TPP more important than True Negative)
+Change this by altering the cutoff for logistic regression
+
+
+
+
+There is a problem with logistic regression instibility if you include any of these variables in the fit
+```{r}
+glm.allfit <- glm(is_intrusion~ ., family = binomial, data = traffic.train)
+kable(coef(summary(glm.allfit)))
+```
+
+The most important variables in this regression are flagError, dst_bytes, and hot. Nothing else is significant at the 0.05 level. These variables have an impact on intrusions.
+
+
+```{r}
+glm.allprob <- predict(glm.allfit, traffic.train, type="response")
+glm.allpred <- rep(0, nrow(traffic.train))
+glm.allpred[glm.allprob>.3] = 1
+table(glm.allpred, traffic.train$is_intrusion)
+```
+
+
+Logistic Regression with Best Subset Selection
+```{r}
+glm.subset <- regsubsets(is_intrusion~., 
+                         data = traffic.train,
+                         nbest = 1,
+                         nvmax = 29,
+                         method="exhaustive")
+summary(glm.subset)
+```
+
+
+When only one variable is used to predict intrusions, src_bytes is used. The second variable added to the regression is service: private. The third is is_guest_login = 1. The fourth is flag: Error. 
+
+
+
+
+```{r}
+glm.summary <- summary(glm.subset)
+glm.summary$rsq
+```
+
+```{r}
+plot(glm.subset)
+```
+
+dst_bytes only appears in one model, even though it seemed important in the full regression model. It might not be as important as it first seemed.
+
+
+Graphing code taken from the homework
+```{r}
+
+num_variables <- seq(1, length(glm.summary$rss))
+
+plot_RSQ<-ggplot(data = data.frame(glm.summary$rsq),
+                 aes(x=num_variables,y=glm.summary$rsq))+
+  geom_line()+
+  geom_point(x=which.max(glm.summary$rsq),
+             y=max(glm.summary$rsq),aes(color="red"),
+             show.legend = FALSE)+
+  xlab("# Variables")+
+  ylab("R-squared")+
+  theme_bw()
+
+
+#RSS
+plot_RSS<-ggplot(data = data.frame(glm.summary$rss),
+                 aes(x=num_variables,y=glm.summary$rss))+
+  geom_line()+
+  geom_point(x=which.min(glm.summary$rss),
+             y=min(glm.summary$rss),aes(color="blue"),
+             show.legend = FALSE)+
+  xlab("# Variables")+
+  ylab("RSS")+
+  theme_bw()
+
+#BIC
+plot_BIC<-ggplot(data = data.frame(glm.summary$bic),
+                 aes(x=num_variables,y=glm.summary$bic))+
+  geom_line()+
+  geom_point(x=which.min(glm.summary$bic),
+             y=min(glm.summary$bic),aes(color="green"),
+             show.legend = FALSE)+
+  xlab("# Variables")+
+  ylab("BIC")+
+  theme_bw()
+
+
+#No ability to plot AIC, but is proportional to Cp
+#CP
+plot_CP<-ggplot(data = data.frame(glm.summary$cp),
+                 aes(x=num_variables,y=glm.summary$cp))+
+  geom_line()+
+  geom_point(x=which.min(glm.summary$cp),
+             y=min(glm.summary$cp),aes(color="yellow"),
+             show.legend = FALSE)+
+  xlab("# Variables")+
+  ylab("Cp")+
+  theme_bw()
+
+
+
+grid.arrange(plot_RSQ, plot_RSS, plot_CP, plot_BIC, ncol=2, nrow=2)
+
+```
+
+The R-squared value and RSS only get better with more variables, but the Cp is at a minimum at around 11 variables, and the BIC value is at a minimum value of 9 variables. 
+
+
+```{r}
+which.min(glm.summary$bic)
+```
+Use the best subset model with 9 variables 
+
+Find the best model with 9 variables from the full data set to make sure we have the best variabels.
+
+```{r}
+best.nine <- regsubsets(is_intrusion~., data=traffic, nvmax = 10)
+coef(best.nine, 9)
+```
+
+Build a model with these predictors from the training data
+```{r}
+glm.best <- glm(is_intrusion ~ protocol_type + service + flag + src_bytes + hot + logged_in + num_root + is_guest_login, family = binomial, data = traffic.train)
+glm.bestprob <- predict(glm.best, traffic.train, type="response")
+glm.bestpred <- rep(0, nrow(traffic.train))
+glm.bestpred[glm.bestprob>.3] = 1
+table(glm.bestpred, traffic.train$is_intrusion)
+```
+
+
+The variables not included in ths regression are "duration", "dst_bytes", and "num_access_files". It's surprising that "dst_bytes" was significant in the full regression, but not included in the best subsets regresion.
+
+
+
+
+
+KNN regression
+
+Let us check how well KNN regression model can identify intrusion.
+
+Training KNN regression model on the train dataset created earlier.
+
+
+```{r}
+scale.traffic.train <- traffic.train %>%
+  mutate_if(is.numeric, scale)
+
+scale.traffic.test <- traffic.test %>%
+  mutate_if(is.numeric, scale)
+
+
+# converting factor variables to numeric - train data
+scale.traffic.train$protocol_type_num = ifelse(scale.traffic.train$protocol_type == "icmp", 1, 
+                                           ifelse(scale.traffic.train$protocol_type == "tcp", 2,
+                                                  ifelse(scale.traffic.train$protocol_type == "udp", 3, 0)))
+
+
+scale.traffic.train$service_num = ifelse(scale.traffic.train$service == "http", 1, 
+                                           ifelse(scale.traffic.train$service == "smtp", 2,
+                                                  ifelse(scale.traffic.train$service == "private", 3,
+                                                         ifelse(scale.traffic.train$service == "domain_u", 4,
+                                                                ifelse(scale.traffic.train$service == "ftp_data", 5,
+                                                                       ifelse(scale.traffic.train$service == "other", 6, 0))))))
+
+
+
+scale.traffic.train$flag_num = ifelse(scale.traffic.train$flag == "SF", 1, 
+                                           ifelse(scale.traffic.train$flag == "Error", 2, 0))
+
+
+scale.traffic.train$num_root_num = ifelse(scale.traffic.train$num_root == "Non-Zero", 1, 
+                                           ifelse(scale.traffic.train$num_root == "Zero", 0, 2))
+
+scale.traffic.train$logged_in_num = as.numeric(as.character(scale.traffic.train$logged_in))
+
+scale.traffic.train$is_guest_login_num = as.numeric(as.character(scale.traffic.train$is_guest_login))
+
+
+
+
+# converting factor variables to numeric - test data
+
+scale.traffic.test$protocol_type_num = ifelse(scale.traffic.test$protocol_type == "icmp", 1, 
+                                           ifelse(scale.traffic.test$protocol_type == "tcp", 2,
+                                                  ifelse(scale.traffic.test$protocol_type == "udp", 3, 0)))
+
+
+scale.traffic.test$service_num = ifelse(scale.traffic.test$service == "http", 1, 
+                                           ifelse(scale.traffic.test$service == "smtp", 2,
+                                                  ifelse(scale.traffic.test$service == "private", 3,
+                                                         ifelse(scale.traffic.test$service == "domain_u", 4,
+                                                                ifelse(scale.traffic.test$service == "ftp_data", 5,
+                                                                       ifelse(scale.traffic.test$service == "other", 6, 0))))))
+
+
+scale.traffic.test$flag_num = ifelse(scale.traffic.test$flag == "SF", 1, 
+                                           ifelse(scale.traffic.test$flag == "Error", 2, 0))
+
+
+scale.traffic.test$num_root_num = ifelse(scale.traffic.test$num_root == "Non-Zero", 1, 
+                                           ifelse(scale.traffic.test$num_root == "Zero", 0, 2))
+
+scale.traffic.test$logged_in_num = as.numeric(as.character(scale.traffic.test$logged_in))
+
+scale.traffic.test$is_guest_login_num = as.numeric(as.character(scale.traffic.test$is_guest_login))
+
+
+
+scale.traffic.train <- scale.traffic.train %>%
+  mutate_if(is.numeric, scale)
+
+scale.traffic.test <- scale.traffic.test %>%
+  mutate_if(is.numeric, scale)
+
+
+
+summary(scale.traffic.train)
+
+summary(scale.traffic.test)
+
+
+
+knn.pred = knn(scale.traffic.train[,c(1,5,6,7,10,13,14,15,16,17,18)], 
+               scale.traffic.test[,c(1,5,6,7,10,13,14,15,16,17,18)], 
+               scale.traffic.train$is_intrusion, 
+               k=1)
+
+table_k1 = table(knn.pred, scale.traffic.test$is_intrusion)
+
+sensitivity_knn_k1 <- (table_k1[2,2]/(table_k1[2,2] + table_k1[1,2]))
+sensitivity_knn_k1
+
+missclass_knn_k1 <- mean(scale.traffic.test$is_intrusion != knn.pred)
+missclass_knn_k1
+
+
+```
+
+
+The above output shows confusion matrix for the regression with k = 1.
+This regression output sensitivity of 0.4210526 and misclassification of 0.05666667.
+The achieved sensitivity of this model is not very high.
+
+Let us explore other k values to check for how the sensitivity varies with k-value.
+
+
+```{r}
+
+misclass_knn <- c()
+sensitivity_knn <- c()
+
+k.vals <- 1:15
+
+for(kval in k.vals) {
+  knn.pred.kval = knn(scale.traffic.train[,c(1,5,6,7,10,13,14,15,16,17,18)], 
+                      scale.traffic.test[,c(1,5,6,7,10,13,14,15,16,17,18)], 
+                      scale.traffic.train$is_intrusion, 
+                      k=kval)
+  miss_knn <- mean(scale.traffic.test$is_intrusion != knn.pred.kval)
+  misclass_knn <- append(misclass_knn, miss_knn)
+  tab_knn <- table(knn.pred.kval, scale.traffic.test$is_intrusion)
+
+  sens_knn <- (tab_knn[2,2]/(tab_knn[2,2] + tab_knn[1,2]))
+  sensitivity_knn <- append(sensitivity_knn, sens_knn)
+}
+
+sensitivity_knn
+
+
+qplot(k.vals, sensitivity_knn)
+
+
+```
+
+k = 4 achieves the optimum sensitivity possible with the knn model which is 0.5263158 with the set of variables selected for the prediction. Further increase in k value does not increase sensitivity of the output.
+
+
+Create the final knn model with k = 4 which will be used for comparison with models derived with other methods.
+
+
+```{r}
+knn.best <- knn(scale.traffic.train[,c(1,5,6,7,10,13,14,15,16,17,18)], 
+                      scale.traffic.test[,c(1,5,6,7,10,13,14,15,16,17,18)], 
+                      scale.traffic.train$is_intrusion, 
+                      k=4)
+
+```
+
+
+This level of sensitivity with knn regression is not very high.
+
+
+Let us create regression model Lasso method.
+
+
+Lasso:
+
+```{r}
+x_lasso_train = model.matrix(is_intrusion ~ ., traffic.train, family = "binomial")
+x_lasso_test = model.matrix(is_intrusion ~ ., traffic.test, family = "binomial")
+
+y_lasso_train = as.numeric(as.character(traffic.train$is_intrusion))
+y_lasso_test = as.numeric(as.character(traffic.test$is_intrusion))
+
+intrusion_lasso = glmnet(x_lasso_train, y_lasso_train, alpha = 1)
+
+
+coef(intrusion_lasso, s = 0.1)
+
+length(intrusion_lasso$lambda)
+
+plot(intrusion_lasso, label = TRUE)
+
+cv.out_lasso = cv.glmnet(x_lasso_train, y_lasso_train, alpha = 1)
+plot(cv.out_lasso)
+
+
+bestlam = cv.out_lasso$lambda.min
+
+bestlam
+
+lasso.pred_lambda.min = predict(intrusion_lasso, s = bestlam, newx = x_lasso_test)
+
+mean((lasso.pred_lambda.min - y_lasso_test)^2)
+
+
+```
+
+
+We have 78 different lambdas in this model.
+
+Value of lambda that minimizes CV error is about 0.00009680892.
+
+MSE for the lasso model with lambda = 0.00009680892 is 0.04702744.
+
+The coefficients plot shows that the number of variables increases with increase in lambda.
+
+Considering cutoff value of 0.5 for the predicted value of is_intrusion for classifying it as intrusion:
+
+
+```{r}
+
+
+score.factor_lasso <- factor(as.numeric(lasso.pred_lambda.min >= .5), levels = c("0", "1"))
+confusion.mat_lasso <- table(score.factor_lasso, as.factor(y_lasso_test), dnn = list("predicted", "observed"))
+
+confusion.mat_lasso
+
+```
+
+The above confusion metrix is for cut-off value of 0.5. Now lets explore how the sensitivity and misclassification varies with the value of cut-off.
+
+Plotting how the consideration of cut-off value impacts the sensitivity and misclassification of the lasso model:
+
+```{r}
+
+misclass_lasso <- c()
+sensitivity_lasso <- c()
+
+cutoff_lasso <- (1:15)/10
+
+for(cutoff_lasso_i in cutoff_lasso) {
+  score.factor_lasso <- factor(as.numeric(lasso.pred_lambda.min >= cutoff_lasso_i), levels = c("0", "1"))
+  confusion.mat_lasso <- table(score.factor_lasso, as.factor(y_lasso_test), dnn = list("predicted", "observed"))
+
+  miss_lasso <- mean(as.factor(y_lasso_test) != score.factor_lasso)
+  misclass_lasso <- append(misclass_lasso, miss_lasso)
+  tab_lasso <- table(score.factor_lasso, as.factor(y_lasso_test))
+
+  sens_lasso <- (tab_lasso[2,2]/(tab_lasso[2,2] + tab_lasso[1,2]))
+  sensitivity_lasso <- append(sensitivity_lasso, sens_lasso)
+}
+
+sensitivity_lasso
+
+misclass_lasso
+
+qplot(cutoff_lasso, sensitivity_lasso)
+
+qplot(cutoff_lasso, misclass_lasso)
+
+```
+
+
+Cutoff value of up to 0.2 achieves sensitivity of 1.0 and as it increases further the sensitivity reduces.
+
+The misclassification is high towards zero value for cutoff and reduces up to 0.5 with the minimum misclassification being 0.06. It increases as cut-off increases beyond 0.5.
+
+A balanced value of cut-off needs to be decided with trade-off between sensitivity and misclassification levels. From the plots above, it seems an ideal value of cutoff can be around 0.4 depending on the importance of achieving high sensitivity.
+
+The optimum level of cut-off will be decided at later stage when comparing across different methods of regression.
+
+
+
+
+
+Random forests Analysis
+
+
+```{r}
+
+traffic.rf <- randomForest(is_intrusion ~ ., data = traffic.train)
+traffic.rf
+
+var.imp.rf <- varImpPlot(traffic.rf)
+
+# most important variables ranked
+
+rownames(var.imp.rf)[order(var.imp.rf, decreasing = TRUE)]
+
+# The variables are ranked above based on their importance. src_bytes, duration, service and dst_bytes seems to be most important for is_intrusion.
+
+
+rf.test.prob <- predict(traffic.rf, newdata = traffic.test, type = "prob")[,"1"]
+
+
+
+score.factor_rf <- factor(as.numeric(rf.test.prob >= .5), levels = c("0", "1"))
+confusion.mat_rf <- table(score.factor_rf, as.factor(traffic.test$is_intrusion), dnn = list("predicted", "observed"))
+
+confusion.mat_rf
+
+mean((rf.test.prob - as.numeric(as.character(traffic.test$is_intrusion)))^2)
+
+```
+
+MSE for the above fitted randomforest model is 0.03008746.
+From the plot above we can conclude that three most important variables are Src_bytes, Duration and Service.
+
+In the above plot we have considered the cutoff value of 0.5 for the predicted value of is_intrusion for classifying it as intrusion.
+Now lets explore how the sensitivity and misclassification varies with the value of cut-off.
+
+Plotting how the consideration of cut-off value impacts the sensitivity and misclassification of the Random Forest model:
+
+```{r}
+
+y_rf_test = as.numeric(as.character(traffic.test$is_intrusion))
+
+
+misclass_rf <- c()
+sensitivity_rf <- c()
+
+cutoff_rf <- (1:15)/10
+
+for(cutoff_rf_i in cutoff_rf) {
+  score.factor_rf_vec <- factor(as.numeric(rf.test.prob >= cutoff_rf_i), levels = c("0", "1"))
+  confusion.mat_rf_vec <- table(score.factor_rf_vec, as.factor(y_rf_test), dnn = list("predicted", "observed"))
+
+  miss_rf <- mean(as.factor(y_rf_test) != score.factor_rf_vec)
+  misclass_rf <- append(misclass_rf, miss_rf)
+  tab_rf <- table(score.factor_rf_vec, as.factor(y_rf_test))
+
+  sens_rf <- (tab_rf[2,2]/(tab_rf[2,2] + tab_rf[1,2]))
+  sensitivity_rf <- append(sensitivity_rf, sens_rf)
+}
+
+sensitivity_rf
+
+misclass_rf
+
+qplot(cutoff_rf, sensitivity_rf)
+
+qplot(cutoff_rf, misclass_rf)
+
+```
+Cutoff value of up to 0.1 achieves sensitivity of .9 and as it increases further the sensitivity reduces.
+
+The misclassification is high towards zero value for cutoff and reduces up to 0.2 with the minimum misclassification being 0.3. It increases as cut-off increases  0.4 onwards.
+
+A balanced value of cut-off needs to be decided with trade-off between sensitivity and misclassification levels. From the plots above, it seems an ideal value of cutoff can be around 0.3 depending on the importance of achieving high sensitivity.
+
+The optimum level of cut-off will be decided at later stage when comparing across different methods of regression.
+
+Pruned Decision Trees:
+
+We have followed the same method as above to do analysis with pruned trees.
+
+```{r}
+
+traffic.tree <- rpart(is_intrusion ~ ., data = traffic.train)
+plot(traffic.tree)
+text(traffic.tree)
+print(traffic.tree)
+
+
+```
+is_guest_login, duration, dst_bytes and src_bytes are the variables that get used in fitting the tree.
+
+
+
+
+
+```{r}
+
+
+traffic.train_prune <- rpart(is_intrusion ~ ., data = traffic.train, 
+                        control = rpart.control(minsplit=100, cp=0.002))
+
+# Running the `plotcp` command on this tree. Also looking at the `cptable` attribute of `marketing.full`
+
+plotcp(traffic.train_prune)
+
+traffic.train_prune$cptable
+
+
+
+# Applying the 1-SE rule to determine which value of cp to use for pruning
+
+
+min.cv.idx <- which.min(traffic.train_prune$cptable[,"xerror"])
+
+# min CV error + 1se (this is the height of the horizontal bar)
+
+min.cv.err.1se <- traffic.train_prune$cptable[min.cv.idx,"xerror"] +
+                    traffic.train_prune$cptable[min.cv.idx,"xstd"]
+
+# Which cp values produce models whose error is below min CV + 1se?
+
+candidate.cp.vals <- traffic.train_prune$cptable[which(traffic.train_prune$cptable[,"xerror"] < min.cv.err.1se),"CP"]
+
+# 1-SE rule value of cp
+cp.1se <- max(candidate.cp.vals)
+print(cp.1se)
+
+
+```
+
+1-SE rule value of cp = 0.002
+
+Using the prune command (prune(rpart.fit, cp = )) to prune traffic.train_prune
+
+
+
+```{r}
+
+traffic.prune_1se <- prune(traffic.train_prune, cp = cp.1se)
+print(traffic.prune_1se)
+
+
+prune.test.prob <- predict(traffic.prune_1se, newdata = traffic.test, type = "prob")[,"1"]
+
+
+score.factor_prune <- factor(as.numeric(prune.test.prob >= .5), levels = c("0", "1"))
+confusion.mat_prune <- table(score.factor_prune, as.factor(traffic.test$is_intrusion), dnn = list("predicted", "observed"))
+
+confusion.mat_prune
+
+mean((prune.test.prob -
+        as.numeric(as.character(traffic.test$is_intrusion)))^2)
+
+
+```
+
+The MSE value for the pruned model fitted above is 0.04384404.
+
+
+```{r}
+
+y_prune_test = as.numeric(as.character(traffic.test$is_intrusion))
+
+
+misclass_prune <- c()
+sensitivity_prune <- c()
+
+cutoff_prune <- (1:15)/10
+
+for(cutoff_prune_i in cutoff_prune) {
+  score.factor_prune_vec <- factor(as.numeric(prune.test.prob >= cutoff_prune_i), levels = c("0", "1"))
+  confusion.mat_prune_vec <- table(score.factor_prune_vec, as.factor(y_prune_test), dnn = list("predicted", "observed"))
+
+  miss_prune <- mean(as.factor(y_prune_test) != score.factor_prune_vec)
+  misclass_prune <- append(misclass_prune, miss_prune)
+  tab_prune <- table(score.factor_prune_vec, as.factor(y_prune_test))
+
+  sens_prune <- (tab_prune[2,2]/(tab_prune[2,2] + tab_prune[1,2]))
+  sensitivity_prune <- append(sensitivity_prune, sens_prune)
+}
+
+sensitivity_prune
+
+misclass_prune
+
+qplot(cutoff_prune, sensitivity_prune)
+
+qplot(cutoff_prune, misclass_prune)
+
+```
+
+
+
+
+
+Final model evaluation:
+
+Testing:
+Find the error rates for all of the models on traffic.test data
+Compare with some graphs
+Sensitivity: Proportion of cases predicted as 1 among all cases of intrusion.
+Negative predictive value: probability that if is_intrusion = 0, there actually is not an intrusion.
+False negative is more expensive
+```{r}
+metrics <- function(table) {
+  true.neg = table["0", "0"]
+  true.pos = table["1", "1"]
+  false.neg = table["0", "1"]
+  false.pos = table["1", "0"]
+  
+  accuracy = (true.neg + true.pos)/(true.neg + true.pos + false.neg + false.pos)
+  sensitivity = true.pos / (true.pos + false.neg)
+  npv = true.neg / (true.neg + false.neg)
+  metric.names <- c("accuracy", "sensitivity", "npv")
+
+  value <- c(accuracy, sensitivity, npv)
+  df<- data.frame(value)
+  row.names(df) <- metric.names
+  
+  return(df)
+}
+
+```
+
+
+Plot ROC curve with these predictions
+
+Full logistic regression model:
+```{r}
+glm.testprob <- predict(glm.allfit, traffic.test, type="response")
+
+glm.roc <- roc(traffic.test$is_intrusion, glm.testprob)
+plot.roc(glm.roc, print.thres = "local maximas", percent=TRUE, main="ROC", add=FALSE, asp=NA)
+
+```
+
+The logistic regression model has perfect sensitivity for any threshold level less than 0.128. At 0.128, the specificity is still very high.
+Note: exact value may be different based on test and training data randomization.
+
+
+
+
+```{r}
+
+glm.testpred <- rep(0, nrow(traffic.test))
+glm.testpred[glm.testprob>.128] = 1
+glm.mat <- table(glm.testpred, traffic.test$is_intrusion)
+glm.mat
+glm.metrics <- metrics(glm.mat)
+glm.metrics
+miss_glm <- mean(traffic.test$is_intrusion != glm.testpred)
+```
+
+
+Best subset selection with 8 variables
+
+```{r}
+glm.besttestprob <- predict(glm.best, traffic.test, type="response")
+glm.bestroc <- roc(traffic.test$is_intrusion, glm.besttestprob)
+plot.roc(glm.bestroc, print.thres = "local maximas", percent=TRUE, main="ROC", add=FALSE, asp=NA)
+```
+A cutoff of 0.021 gives perfect sensitivity and specificity of 0.83, but a cutoff of 0.21 gives almost perfect sensitivity and a better sensitivity of 0.87. This is the cutoff that will be used.
+
+
+
+
+```{r}
+glm.besttestpred <- rep(0, nrow(traffic.test))
+glm.besttestpred[glm.besttestprob>.21] = 1
+bestglm.mat <- table(glm.besttestpred, traffic.test$is_intrusion)
+bestglm.mat
+bestglm.metrics <- metrics(bestglm.mat)
+bestglm.metrics
+miss_bestglm <- mean(traffic.test$is_intrusion != glm.besttestpred)
+```
+
+
+
+
+
+
+ROC for lasso
+```{r}
+lasso.prob <- predict(intrusion_lasso, s=bestlam, newx = x_lasso_test)
+lasso.roc <- roc(traffic.test$is_intrusion, lasso.prob)
+plot.roc(lasso.roc, print.thres = "local maximas", percent=TRUE,
+         main="ROC", add=FALSE, asp=NA)
+```
+The lasso achieves a perfect sensitivity and a high specificity at a cutoff of 0.169. This will be the cutoff used.
+
+```{r}
+lasso.pred <- rep(0, nrow(traffic.test))
+lasso.pred[lasso.prob > .17] = 1
+lasso.mat <- table(lasso.pred, y_lasso_test)
+lasso.mat
+lasso.metrics <- metrics(lasso.mat)
+lasso.metrics
+miss_lasso <- mean(traffic.test$is_intrusion != lasso.pred)
+```
+
+
+
+Find metrics for KNN using the best k value of k = 4
+
+```{r}
+tab_knn <- table(knn.best, scale.traffic.test$is_intrusion)
+knn.metrics <- metrics(tab_knn)
+knn.metrics
+miss_knn <- mean(traffic.test$is_intrusion != knn.best)
+```
+
+
+```{r}
+rf.prob <- predict(traffic.rf, newdata=traffic.test, type="prob")[,"1"]
+rf.roc <- roc(traffic.test$is_intrusion, rf.prob)
+plot.roc(rf.roc, print.thres = "local maximas", percent=TRUE,
+         main="ROC", add=FALSE, asp=NA)
+```
+
+
+```{r}
+rf.pred <- rep(0, nrow(traffic.test))
+rf.pred[rf.prob > .154] = 1
+rf.mat <- table(rf.pred, traffic.test$is_intrusion)
+rf.mat
+rf.metrics <- metrics(rf.mat)
+rf.metrics
+miss_rf <- mean(traffic.test$is_intrusion != rf.pred)
+```
+```{r}
+prune.prob <- predict(traffic.prune_1se, newdata = traffic.test, type = "prob")[,"1"]
+prune.roc <- roc(traffic.test$is_intrusion, prune.prob)
+plot.roc(prune.roc, print.thres = "local maximas", percent=TRUE,
+         main="ROC", add=FALSE, asp=NA)
+```
+A cutoff of about 0.16 gives a high sensivity with small tradeoffs to specificity.
+
+
+```{r}
+prune.pred <- rep(0, nrow(traffic.test))
+prune.pred[prune.prob > 0.16] = 1
+prune.mat <- table(prune.pred, traffic.test$is_intrusion)
+prune.mat
+prune.metrics <- metrics(prune.mat)
+prune.metrics
+miss_prune <- mean(traffic.test$is_intrusion != rf.pred)
+miss_prune
+```
+
+
+Plot the Accuracy, sensitivity, npv, and percent misclassified of all models
+```{r}
+metrics <- c(glm.metrics, bestglm.metrics, lasso.metrics, knn.metrics, rf.metrics, prune.metrics)
+fit.names <- c("Log Reg", "Subset Log Reg", "Lasso", "KNN", "Random Forest", "Pruned Tree")
+accuracy <- c()
+sensitivity <- c()
+npv <- c()
+metric.df <- data.frame(matrix(ncol=3, nrow=2))
+for(i in metrics) {
+  accuracy <- append(accuracy, i[1])
+  sensitivity <- append(sensitivity, i[2])
+  npv <- append(npv, i[3])
+}
+misclassified <- 100*c(miss_glm, miss_bestglm, miss_lasso, miss_knn, miss_rf, miss_prune)
+metric.df = data.frame(fit.names, accuracy, sensitivity, npv, misclassified)
+metric.df
+
+ggplot(data=metric.df, aes(x=fit.names, y=accuracy)) + 
+  geom_bar(stat="identity", fill="steelblue") +
+  theme(axis.text.x = element_text(angle=70, hjust=1)) +
+  xlab("Regression Type") +
+  ylab("Accuracy") 
+
+ggplot(data=metric.df, aes(x=fit.names, y=sensitivity)) + 
+  geom_bar(stat="identity", fill="steelblue") +
+  theme(axis.text.x = element_text(angle=70, hjust=1)) +
+  xlab("Regression Type") +
+  ylab("Sensitivity") +
+  coord_cartesian(ylim=c(.5, 1))
+ggplot(data=metric.df, aes(x=fit.names, y=npv)) + 
+  geom_bar(stat="identity", fill="steelblue") +
+  theme(axis.text.x = element_text(angle=70, hjust=1)) +
+  xlab("Regression Type") +
+  ylab("NPV") +
+  coord_cartesian(ylim=c(.8, 1))
+
+ggplot(data=metric.df, aes(x=fit.names, y=misclassified)) + 
+  geom_bar(stat="identity", fill="steelblue") +
+  theme(axis.text.x = element_text(angle=70, hjust=1)) +
+  xlab("Regression Type") +
+  ylab("Misclassified (%)") +
+  coord_cartesian(ylim=c(0, 15))
+
+```
+Imporant metrics for correclty finding and classifying intrusions: sensitivty and NPV
+
+Full Logistic Regression
+Medium Accuracy
+Good: High Sensitivity, High NPV, low misclassification %
+
+Best Subset Logistic Regression
+Medium Acuracy
+Good: High sensitivity, high NPV
+Bad: High misclassification %
+
+Lasso
+Good: High sensitivty, high NPV
+Bad: Low accuracy, high misclassification %
+
+Pruned Tree
+Medium Accuracy, medium sensitivity, medium NPV
+Good: Low misclassification %
+
+Random Forest
+Medium sensitity, medium NPV
+Good: High accuracy, low misclassificaiton %
+
+
+KNN
+Good: High accuracy, low misclassificaiton %
+Bad: Very low sensitivity, low NPV
+
+
+
+
+
+Compare the ROC graphs
+Note: KNN does not have probabilities associated with it, so it is not included in the ROC graph
+```{r}
+plot.roc(glm.roc, main="ROC", percent=TRUE, asp=NA)
+plot.roc(glm.bestroc, add=TRUE, col="steelblue",percent=TRUE, main="ROC", asp=NA)
+plot.roc(lasso.roc, add=TRUE, col="green",percent=TRUE, main="ROC", asp=NA)
+plot.roc(rf.roc, add=TRUE, col="red",percent=TRUE, main="ROC", asp=NA)
+plot.roc(prune.roc, add=TRUE, col="yellow",percent=TRUE, main="ROC", asp=NA)
+legend("bottomright", legend=c("Full Logistic Regression", "Best Subset Logsitic Regression", "Lasso", "Random Forest", "Pruned Tree"), col=c("black", "steelblue", "green", "red", "yellow"), lwd=2)
+```
+
+
+
+The full logistic regression model, best subset regression, and lasso all reach 1.0 sensitivity, but the full logsitic regression model is able to do it with minimal loss to specificity. The Random Forest increases in sensitivity with the elast decrease in specificity until a point, then the gains in sensitivty level out, and specificty starts decreasing rapidly. The pruned tree does not do very well.
+
+
+
+
+Analysis of Methods
+
+To evaluate each model's ability to detect network intrusions, it is important to have high sensitivity and high negative predicted value. Sensitivity is the proportion of network intrusions that are correctly identified, and NPV is the proportion of events classified as not network intrusions that were in fact not network intrusions.
+
+From the bar graphs, it can be seen that KNN and random forests have some of the highest accuracies and lowest misclassification rates out of any model. But KNN has a low NPV compared to the other models, and a very low relative sensitivity. With a sensitivity of just above 0.5, it only detects roughly half of the network intrusions in the testing data.
+
+The ROC curve shows that the Random Forest model can increase it's sensitivity with little loss to specificity, up to a sensitivity level of about 0.85. At this level, the specificity is almost at 1. If specificity and sensitivity were equally important, this would be the model to choose. But the ROC shows the random forest model can't do better than a sensitivity level of 0.85, and trying to increase this metric more leads to drastic decreases in the specificity.
+
+The lasso, full logistic regression, and subset logistic regression all are able to reach a sensitivity of 1. That is, all the models were able to correctly identify all of the network intrusions in the testing data. The NPV of the lasso and full logistic regression was 1, while the NPV of the subset logistic regression was close, at 0.998.
+
+Of these models, the full logistic regression had the highest accuracy, with the lasso having the lowest accuracy. The best subset logistic regression had a much higher misclassification rate than the other two models at around 12%, while it was under 10% for the lasso and under 5% for the full logistic regression.
+
+
+Given the very high sensitivity and NPV, the relatively high accuracy, and the low misclassification rate, we recommend using the full logistic model with a cutoff probability of 12.8% to find network intrusions.
+
+If the company finds that too many normal connections are being misclassified as intrusions, we recommend switching to a random forest with a cutoff of 15.4%. This will decrease the sensitivity but increase the specificity.
+
+One possible problem with the logistic regression model is predicting an intrusion if a log does not have a value for all of the predictors.
+
+In conclusion, we have observed that the following variables src_bytes, service, flag, logged_in, and dst_bytes are the discerning variables that exert some degree of association on recognizing intrusions. We are confident that our models can detect intrusions in the system. New log files can be run using the full logistic regression model, glm.allfit, or the random forest model, traffic.rf.

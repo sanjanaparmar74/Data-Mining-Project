@@ -1,7 +1,7 @@
 # Projects
-Programming Language : R
+Programming Language: R
 
-Models Used:Logistic regression with best subset selection, KNN Regression, Lasso Regression, Random Forest Analysis, Pruned Decision Trees.
+Models Used: Logistic regression with best subset selection, KNN Regression, Lasso Regression, Random Forest Analysis, Pruned Decision Trees.
 
 Objective: 
 The project observes a year long record of bank logs to achieve the following objectives:
